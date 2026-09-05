@@ -189,23 +189,6 @@ The **~85% write-avoidance figure** is measured empirically via the automated te
 
 ---
 
-## What's verified end-to-end
-
-- ✅ **15/15 automated tests passing** (WireMock + embedded Redis, no live network dependency)
-- ✅ **Live-tested against a real Amazon product URL:** real scrape &rarr; real Redis delta-cache decision &rarr; real Telegram bot reply
-- ✅ **Scheduler autonomously re-polls** tracked products on its own cadence without manual triggering
-- ✅ **Dashboard reflects live, non-fabricated metrics** during a real run
-
----
-
-## Scope & limitations
-
-- Currently supports **Amazon and Flipkart**; adding a platform requires only a new extractor class with its own DOM selectors — the caching, locking, rate-limiting, and scheduling layers are platform-agnostic and need no changes.
-- **robots.txt parsing and commercial ToS compliance** are explicitly out of scope for this educational/portfolio project.
-- **Scraper selectors are inherently fragile** to upstream layout changes; selector failures are surfaced via the `pricepulse.scraper.dom.failures` metric rather than failing silently.
-
----
-
 ## Author
 
 Built by **Dhaval Tolani**. [GitHub](https://github.com/Dhaval1306/PricePulse)
