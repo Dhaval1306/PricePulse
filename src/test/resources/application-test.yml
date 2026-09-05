@@ -57,3 +57,14 @@ resilience4j:
         base-config: default
       flipkart:
         base-config: default
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,metrics,prometheus,pricepulse"
+  endpoint:
+    health:
+      show-details: always
+    pricepulse:
+      enabled: true
