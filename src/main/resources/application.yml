@@ -38,6 +38,10 @@ scraper:
   jitter:
     min-ms: 1000
     max-ms: 3000
+  concurrency:
+    amazon: 3
+    flipkart: 3
+    default: 5
 
 resilience4j:
   circuitbreaker:
