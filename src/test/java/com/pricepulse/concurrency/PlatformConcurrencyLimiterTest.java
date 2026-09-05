@@ -74,4 +74,19 @@ class PlatformConcurrencyLimiterTest {
         assertEquals(2, successfulAcquisitions.get(),
                 "Only 2 threads should be permitted concurrently when limit is 2");
     }
+
+    @Test
+    @DisplayName("Should eagerly report configured permits for both platforms even before any scrape has occurred")
+    void testEagerPermitAvailabilityBeforeScraping() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        PlatformConcurrencyLimiter freshLimiter = new PlatformConcurrencyLimiter(registry);
+        ReflectionTestUtils.setField(freshLimiter, "amazonPermits", 3);
+        ReflectionTestUtils.setField(freshLimiter, "flipkartPermits", 3);
+        freshLimiter.init();
+
+        assertEquals(3, freshLimiter.getAvailablePermits("amazon"),
+                "Amazon permits should report configured max (3) before any scrape");
+        assertEquals(3, freshLimiter.getAvailablePermits("flipkart"),
+                "Flipkart permits should report configured max (3) even when no Flipkart URL has been scraped");
+    }
 }

@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
@@ -86,9 +87,15 @@ public class PlatformConcurrencyLimiter {
         }
     }
 
+    @PostConstruct
+    public void init() {
+        getOrCreateSemaphore("amazon");
+        getOrCreateSemaphore("flipkart");
+    }
+
     public int getAvailablePermits(String platform) {
-        Semaphore semaphore = semaphores.get(normalizePlatform(platform));
-        return semaphore != null ? semaphore.availablePermits() : 0;
+        String normalized = normalizePlatform(platform);
+        return getOrCreateSemaphore(normalized).availablePermits();
     }
 
     private Semaphore getOrCreateSemaphore(String platform) {

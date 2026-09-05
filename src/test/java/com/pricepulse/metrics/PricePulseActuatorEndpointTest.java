@@ -36,6 +36,8 @@ class PricePulseActuatorEndpointTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.deltaCachePerformance", notNullValue()))
                 .andExpect(jsonPath("$.deltaCachePerformance.targetBenchmarkClaim", is("~85% write reduction")))
+                .andExpect(jsonPath("$.trafficManagement.amazonAvailableConcurrencyPermits", is(2)))
+                .andExpect(jsonPath("$.trafficManagement.flipkartAvailableConcurrencyPermits", is(2)))
                 .andExpect(jsonPath("$.systemArchitecture.threadingModel", containsString("Java 21 Virtual Threads")))
                 .andExpect(jsonPath("$.systemArchitecture.carrierPinningSafeguard", containsString("ReentrantLock")))
                 .andExpect(jsonPath("$.systemArchitecture.distributedLocking", containsString("Redis SETNX")));
