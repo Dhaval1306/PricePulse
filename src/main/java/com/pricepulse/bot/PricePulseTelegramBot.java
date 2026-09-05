@@ -19,6 +19,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
+import jakarta.annotation.PostConstruct;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Message;
@@ -40,6 +41,7 @@ public class PricePulseTelegramBot extends TelegramLongPollingBot {
     @Value("${telegram.bot.username:PricePulseBot}")
     private String botUsername;
 
+    private final String botToken;
     private final UserRepository userRepository;
     private final ProductRepository productRepository;
     private final UserProductSubscriptionRepository subscriptionRepository;
@@ -60,6 +62,7 @@ public class PricePulseTelegramBot extends TelegramLongPollingBot {
             CircuitBreakerRegistry circuitBreakerRegistry,
             PlatformConcurrencyLimiter concurrencyLimiter) {
         super(botToken);
+        this.botToken = botToken;
         this.userRepository = userRepository;
         this.productRepository = productRepository;
         this.subscriptionRepository = subscriptionRepository;
@@ -68,6 +71,33 @@ public class PricePulseTelegramBot extends TelegramLongPollingBot {
         this.meterRegistry = meterRegistry;
         this.circuitBreakerRegistry = circuitBreakerRegistry;
         this.concurrencyLimiter = concurrencyLimiter;
+    }
+
+    @PostConstruct
+    public void init() {
+        if (botToken == null || botToken.isBlank()) {
+            logger.warn("Telegram bot token is NOT configured (empty or blank). Bot cannot connect to Telegram.");
+        } else if ("mock_token_for_dev".equals(botToken.trim())) {
+            logger.warn("Telegram bot token is using fallback/dev default ('mock_token_for_dev'). " +
+                    "Real Telegram updates will NOT be received. Set the TELEGRAM_BOT_TOKEN environment variable.");
+        } else {
+            logger.info("Telegram bot token resolved with prefix: {} (length: {})",
+                    getMaskedToken(), botToken.trim().length());
+        }
+    }
+
+    public String getMaskedToken() {
+        if (botToken == null || botToken.isBlank()) {
+            return "<EMPTY>";
+        }
+        String trimmed = botToken.trim();
+        if ("mock_token_for_dev".equals(trimmed)) {
+            return "mock_token_for_dev";
+        }
+        if (trimmed.length() <= 4) {
+            return "****";
+        }
+        return trimmed.substring(0, 4) + "...";
     }
 
     @Override
@@ -82,6 +112,8 @@ public class PricePulseTelegramBot extends TelegramLongPollingBot {
             Long chatId = message.getChatId();
             String text = message.getText().trim();
             String username = message.getFrom().getUserName();
+
+            logger.info("Received Telegram message from chat {} (@{}): {}", chatId, username != null ? username : "unknown", text);
 
             User user = getOrCreateUser(chatId, username);
 
