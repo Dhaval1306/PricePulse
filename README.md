@@ -1,5 +1,8 @@
 # PricePulse ⚡
-### High-Concurrency E-Commerce Price Monitor & Resilient Alert Engine
+
+An automated e-commerce price monitoring and alert engine built to explore distributed caching, concurrency, and resilience patterns in a real-world backend system — not just another scraper bot.
+
+Tracks product prices and stock across Amazon and Flipkart, avoids redundant database writes via a Redis delta-cache, and pushes instant alerts through a Telegram bot whenever a tracked product's price drops or hits a target threshold.
 
 [![Java 21](https://img.shields.io/badge/Java-21%20LTS-orange.svg?style=flat&logo=openjdk)](https://openjdk.org/projects/jdk/21/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3.4-brightgreen.svg?style=flat&logo=springboot)](https://spring.io/projects/spring-boot)
@@ -7,196 +10,202 @@
 [![Redis](https://img.shields.io/badge/Redis-Delta--Cache-red.svg?style=flat&logo=redis)](https://redis.io/)
 [![Resilience4j](https://img.shields.io/badge/Resilience4j-Circuit%20Breaker-yellow.svg)](https://resilience4j.readme.io/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram%20Bot-Zero--Frontend%20UI-blue.svg?logo=telegram)](https://core.telegram.org/bots/api)
-[![Build Status](https://img.shields.io/badge/Tests-8%20Passed%20(WireMock%20%2B%20Jedis--Mock)-success.svg)]()
-
-> **PricePulse** is an automated price monitoring and alert engine built with **Java 21, Spring Boot 3, Redis, PostgreSQL, and Jsoup**. It solves two core distributed systems challenges inherent to automated price monitors: **I/O thread starvation under high concurrency** and **database write amplification on static retail listings**.
+[![Tests Passing](https://img.shields.io/badge/Tests-15%20Passed%20(WireMock%20%2B%20Jedis--Mock)-success.svg)]()
 
 ---
 
-## 🏛️ System Architecture
+## Why this project exists
+
+Most "price tracker" projects are a scraper wrapped around a database. PricePulse is built around a different question: **how do you poll hundreds of external, unreliable, rate-limited sources on a schedule without hammering your database, tripping anti-bot defenses, or corrupting state under concurrent access?**
+
+Every core module here exists to answer a specific piece of that problem — not to add a checkbox feature.
+
+---
+
+## Architecture
 
 ```mermaid
-graph TD
-    User([Telegram User]) <-->|Commands & Instant Alerts| TB[Telegram Bot Interface]
-
-    subgraph Polling & Dispatch Layer
-        Scheduler[Scheduled Polling Task] -->|Dispatches Product IDs| VT[Java 21 Virtual Thread Pool]
+flowchart TB
+    subgraph Scheduler["Scheduler (Spring @Scheduled)"]
+        S[Dispatch active products]
     end
 
-    subgraph Resilience & Scraping Pipeline
-        VT --> Sem[Platform Semaphore Concurrency Cap]
-        Sem --> RL[Sliding Window Rate Limiter (Redis Lua)]
-        RL -->|Under Quota| Lock[Redis SETNX Distributed Lock]
-        RL -->|Throttled| Defer[Skip & Defer to Next Run]
-        Lock --> CB[Resilience4j Circuit Breaker]
-        CB --> Scraper[Jsoup Scraper Engine (Rotating Headers & Jitter)]
+    subgraph VT["Java 21 Virtual Thread Pool"]
+        W1[Worker: acquire platform semaphore]
+        W2[Worker: acquire Redis distributed lock]
+        W3[Worker: resilient scrape]
+        W4[Worker: delta-cache compare-on-write]
+        W5[Worker: dispatch alert if needed]
     end
 
-    subgraph Delta-Cache & Storage Layer
-        Scraper --> Delta{Redis Delta-Cache Check}
-        Delta -->|Price Unchanged| Drop[Drop Write & writes.avoided++]
-        Delta -->|Price Delta Detected| Commit[Commit to PostgreSQL & writes.committed++]
-        Commit --> DB[(PostgreSQL Database)]
-        Commit --> AlertQueue[Async Alert Dispatcher]
+    subgraph Ext["External Platforms"]
+        AMZ[Amazon]
+        FLP[Flipkart]
     end
 
-    AlertQueue -->|Push Markdown Alert| TB
+    subgraph Data["Data Layer"]
+        R[(Redis — delta-cache, locks, rate limiter)]
+        P[(PostgreSQL — source of truth)]
+    end
+
+    subgraph Bot["Telegram Bot"]
+        T[Command handlers + push alerts]
+    end
+
+    S --> W1 --> W2 --> W3 --> W4 --> W5
+    W3 -->|Jsoup + rotating headers + circuit breaker| Ext
+    W2 <--> R
+    W4 <--> R
+    W4 --> P
+    W5 --> T
+    T <--> P
 ```
 
 ---
 
-## 🚀 Key Engineering Highlights
+## Key engineering decisions
 
-### 1. In-Memory Redis Delta-Cache (~85% Write Reduction)
-* **The Problem:** Polling hundreds of product URLs at short intervals causes heavy database write amplification; over 85–90% of checks yield identical prices.
-* **Our Solution:** A cache-aside layer (`pricepulse:product:{id}:state`) intercepts scrape results.
-  * **Unchanged Price:** Updates only a lightweight in-memory heartbeat, resets the sliding TTL on every touch, drops the PostgreSQL write, and increments `pricepulse.db.writes.avoided`.
-  * **Price Delta:** Updates PostgreSQL (`products` current price and appends to `price_history`), updates Redis, and increments `pricepulse.db.writes.committed`.
-* **Redundant-Write Tolerance:** The append-only time-series design of `price_history` ensures that in mid-write crashes, consistency self-heals on the next polling tick without corrupted state.
-
-### 2. High-Concurrency Java 21 Virtual Threads (Project Loom)
-* **I/O-Bound Efficiency:** Replaces heavy OS platform threads ($pprox 1\text{MB}$ memory overhead each) with lightweight Java 21 Virtual Threads (`Executors.newVirtualThreadPerTaskExecutor()`).
-* **Non-Blocking Carrier Execution:** When virtual threads hit `Thread.sleep(jitter)` or block waiting for external network socket responses, the JVM cleanly unmounts them from the carrier OS thread.
-* **Thread Pinning Safeguard:** Audited the entire codebase to eliminate `synchronized` blocks in favor of explicit `ReentrantLock` and atomic CAS operations, preventing carrier OS thread pinning.
-
-### 3. Distributed Sliding Window Rate Limiter (Redis Sorted Sets + Lua)
-* **The Algorithm:** Implements a rolling Sliding Window Log per domain (`pricepulse:ratelimit:{platform}`) using Redis Sorted Sets (`ZREMRANGEBYSCORE`, `ZCARD`, `ZADD`).
-* **Atomic Execution:** Entire check-and-insert sequence runs inside an atomic Lua script in Redis's single-threaded event loop, eliminating race conditions.
-* **Skip-and-Defer Backpressure:** When rate-limited, workers skip the task for the current cycle and defer to the next scheduled tick, preventing thundering herds at window boundaries.
-
-### 4. Resilient Scraper & Circuit Breakers (Resilience4j)
-* **Domain-Isolated Circuit Breakers:** Independent circuit breakers for `amazon` and `flipkart` prevent outages on one platform from cascading to others.
-* **Finite State Machine:**
-  * **CLOSED:** Tracks failures over a sliding window.
-  * **OPEN:** If failure rate exceeds 50%, fast-fails immediately for 60 seconds without creating outbound network connections.
-  * **HALF-OPEN:** Dispatches probe requests to verify server recovery.
-* **Exponential Backoff & Full Jitter:** Retries use $\text{random}(\text{base} \times 2^k / 2, \text{base} \times 2^k)$ to prevent synchronized retries.
-* **Selector Rot Observability:** Tracks `pricepulse.scraper.dom.failures` tagged with platform & field when site layouts change.
-
-### 5. Zero-Frontend Telegram Bot Client
-Uses the Telegram Bot API as an asynchronous, zero-overhead user interface:
-* `/start` — Welcome message and command reference.
-* `/track <url> [target_price]` — Validates domain, scrapes initial details, creates product & subscription, and seeds Redis cache.
-* `/untrack <product_id>` — Unsubscribes from tracking.
-* `/list` — Lists all active tracked items, latest prices, stock status, and target thresholds.
-* `/status` — Displays real-time delta-cache performance, write-reduction rate, circuit breaker states, and concurrency metrics.
+| Component | What it does | Why it matters |
+| :--- | :--- | :--- |
+| **Redis delta-cache** | Compares scraped price against cached state; writes to PostgreSQL only on genuine change | Avoided ~86% of redundant DB writes in automated test benchmarks (1,000 simulated cycles, embedded Redis) — see [Metrics](#metrics--observability) |
+| **SETNX distributed lock** | Redis `SETNX` with an atomic Lua release script (token-checked, not a blind `DEL`) | Prevents two workers from double-processing the same product under concurrent scrape triggers |
+| **Per-platform circuit breakers (Resilience4j)** | Trips to `OPEN` after 50% failure rate over a 10-request window, fast-fails for 60s, then probes via `HALF-OPEN` | One platform's outage never cascades to another; avoids wasting threads retrying a dead endpoint |
+| **Full-jitter exponential backoff** | $\text{random}(\text{base} \times 2^{\text{attempt}} / 2, \text{base} \times 2^{\text{attempt}})$ on retry, plus 1–3s jitter before every request | Decorrelates retry timing across workers — avoids the "thundering herd" spike that plain exponential backoff causes |
+| **Java 21 virtual threads** | `Executors.newVirtualThreadPerTaskExecutor()` for the scrape worker pool | I/O-bound scraping (blocked ~98% of the time on network waits) is far cheaper on virtual threads than platform threads — no 1MB-per-thread stack cost, no thread-pool queuing bottleneck |
+| **Per-platform Semaphore** | Caps in-flight concurrent requests per platform (e.g. 3 for Amazon) | Prevents virtual threads from being too effective — without this, thousands of concurrent scrapes would trigger anti-bot defenses instantly |
+| **Distributed sliding-window rate limiter** | Redis sorted set + atomic Lua script (`ZREMRANGEBYSCORE` &rarr; `ZCARD` &rarr; `ZADD`) enforcing $N$ requests per rolling 60s window per platform | Mathematically eliminates the "burst at the window boundary" flaw of fixed-window counters; throttled tasks are skipped and deferred to the next cycle rather than waiting in-place, to avoid reintroducing a thundering herd |
+| **ReentrantLock over synchronized** | Audited to zero `synchronized` blocks in concurrent code paths | `synchronized` pins a virtual thread to its carrier thread on blocking I/O, negating the entire benefit of Project Loom |
 
 ---
 
-## 📊 Observability & Metrics (Spring Actuator + Micrometer)
+## Tech stack
 
-Exposed via `/actuator/pricepulse` and `/actuator/prometheus`:
+- **Language / Runtime:** Java 21 (LTS)
+- **Framework:** Spring Boot 3
+- **Persistence:** PostgreSQL + Spring Data JPA, Flyway migrations
+- **Caching / Coordination:** Redis (delta-cache, distributed locks, rate limiter)
+- **Scraping:** Jsoup
+- **Resilience:** Resilience4j (circuit breakers)
+- **Messaging:** Telegram Bot API
+- **Observability:** Micrometer + Spring Actuator (custom `/actuator/pricepulse` dashboard)
+- **Testing:** JUnit 5, WireMock (HTTP mocking), embedded Redis (`jedis-mock`)
+
+---
+
+## Bot commands
+
+| Command | Description |
+| :--- | :--- |
+| `/start` | Onboarding message and command overview |
+| `/track <url> [target_price]` | Validates the URL, scrapes initial product data, creates the subscription, seeds the cache |
+| `/untrack <product_id>` | Deactivates a subscription |
+| `/list` | Shows all tracked products with current price, stock, and target |
+| `/status` | Live system health: scrape counts, write-avoidance rate, circuit breaker states |
+
+---
+
+## Database schema
+
+- `users` — Telegram identity (chat ID, username)
+- `products` — URL, platform, title, current price, stock status
+- `user_product_subscriptions` — links users to tracked products with a target price
+- `price_history` — append-only time-series log of every committed price snapshot, indexed on `(product_id, recorded_at DESC)` for fast trend queries
+
+---
+
+## Running locally
+
+### 1. Start Postgres and Redis
+```bash
+docker run --name pricepulse-postgres \
+  -e POSTGRES_DB=pricepulse \
+  -e POSTGRES_USER=pricepulse \
+  -e POSTGRES_PASSWORD=devpassword \
+  -p 5432:5432 -d postgres:16
+
+docker run --name pricepulse-redis -p 6379:6379 -d redis:7
+```
+
+### 2. Set environment variables
+
+#### Linux / macOS (Bash)
+```bash
+export DB_URL="jdbc:postgresql://localhost:5432/pricepulse"
+export DB_USERNAME="pricepulse"
+export DB_PASSWORD="devpassword"
+export REDIS_HOST="localhost"
+export REDIS_PORT="6379"
+export TELEGRAM_BOT_TOKEN="<your-botfather-token>"
+```
+
+#### Windows (PowerShell)
+```powershell
+$env:DB_URL="jdbc:postgresql://localhost:5432/pricepulse"
+$env:DB_USERNAME="pricepulse"
+$env:DB_PASSWORD="devpassword"
+$env:REDIS_HOST="localhost"
+$env:REDIS_PORT="6379"
+$env:TELEGRAM_BOT_TOKEN="<your-botfather-token>"
+```
+
+### 3. Run tests, then start the app
+```bash
+./mvnw test
+./mvnw spring-boot:run
+```
+
+Full setup walkthrough (Windows/PowerShell, including common pitfalls) is in [docs/RUN_AND_TEST.md](docs/RUN_AND_TEST.md).
+
+---
+
+## Metrics & observability
+
+`GET /actuator/pricepulse` exposes a live dashboard:
 
 ```json
 {
   "deltaCachePerformance": {
-    "totalScrapesProcessed": 1000,
-    "databaseWritesAvoided": 857,
-    "databaseWritesCommitted": 143,
-    "writeAvoidanceRate": "85.70%",
-    "targetBenchmarkClaim": "~85% write reduction",
-    "lockContentionInstances": 0
+    "totalScrapesProcessed": 1,
+    "databaseWritesAvoided": 1,
+    "writeAvoidanceRate": "100.00%",
+    "targetBenchmarkClaim": "~85% write reduction"
   },
   "resilience4jCircuitBreakers": {
-    "amazon": { "state": "CLOSED", "failureRateThreshold": "50.0%", "slidingWindowSize": 10 },
-    "flipkart": { "state": "CLOSED", "failureRateThreshold": "50.0%", "slidingWindowSize": 10 }
+    "amazon": {
+      "state": "CLOSED"
+    },
+    "flipkart": {
+      "state": "CLOSED"
+    }
   },
   "trafficManagement": {
     "amazonRemainingQuota": 19,
-    "flipkartRemainingQuota": 20,
-    "amazonAvailableConcurrencyPermits": 3,
-    "flipkartAvailableConcurrencyPermits": 3
-  },
-  "systemArchitecture": {
-    "threadingModel": "Java 21 Virtual Threads (Project Loom)",
-    "carrierPinningSafeguard": "ReentrantLock enforced (zero synchronized blocks)",
-    "distributedLocking": "Redis SETNX with atomic Lua release",
-    "rateLimiterAlgorithm": "Sliding Window Log via Redis Sorted Sets"
+    "amazonAvailableConcurrencyPermits": 3
   }
 }
 ```
 
----
-
-## 🗄️ PostgreSQL Schema Design
-
-```sql
--- Tracked Products
-CREATE TABLE products (
-    id BIGSERIAL PRIMARY KEY,
-    url TEXT UNIQUE NOT NULL,
-    platform VARCHAR(50) NOT NULL,
-    title VARCHAR(500) NOT NULL,
-    image_url TEXT,
-    current_price NUMERIC(12, 2) NOT NULL,
-    currency VARCHAR(10) DEFAULT 'INR',
-    is_in_stock BOOLEAN DEFAULT TRUE,
-    last_checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Immutable Append-Only Price Snapshots
-CREATE TABLE price_history (
-    id BIGSERIAL PRIMARY KEY,
-    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    price NUMERIC(12, 2) NOT NULL,
-    is_in_stock BOOLEAN DEFAULT TRUE,
-    recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Composite Index for Fast Trend Lookups
-CREATE INDEX idx_price_history_product_recorded 
-ON price_history(product_id, recorded_at DESC);
-```
+The **~85% write-avoidance figure** is measured empirically via the automated test suite (`PricePulseMetricsTest`), which simulates 1,000 scrape cycles against a stable catalog using embedded Redis — not an estimate.
 
 ---
 
-## 🧪 Comprehensive Testing Suite
+## What's verified end-to-end
 
-All tests run locally with **zero external dependencies** and **no live web requests**:
-
-* **`WireMockScraperIntegrationTest`:** Uses WireMock to stub Amazon/Flipkart HTML, validating DOM parsing and verifying that consecutive 503 errors trip the Resilience4j Circuit Breaker to `OPEN`.
-* **`PriceCacheServiceTest`:** Uses an embedded in-memory Redis instance (`jedis-mock`) to verify `SETNX` distributed lock contention, cache seeding, and proves that identical prices avoid database writes.
-* **`RateLimiterServiceTest`:** Validates sliding window quota enforcement using in-memory Redis and atomic Lua script execution.
-* **`PlatformConcurrencyLimiterTest`:** Verifies Semaphore concurrency boundaries across concurrent virtual threads.
-
-Run all tests:
-```bash
-./mvnw clean test
-```
+- ✅ **15/15 automated tests passing** (WireMock + embedded Redis, no live network dependency)
+- ✅ **Live-tested against a real Amazon product URL:** real scrape &rarr; real Redis delta-cache decision &rarr; real Telegram bot reply
+- ✅ **Scheduler autonomously re-polls** tracked products on its own cadence without manual triggering
+- ✅ **Dashboard reflects live, non-fabricated metrics** during a real run
 
 ---
 
-## 🛠️ Quickstart (100% Free Setup)
+## Scope & limitations
 
-### Prerequisites
-* **Java 21 LTS**
-* **PostgreSQL** (Local or free cloud database via [Neon.tech](https://neon.tech))
-* **Redis** (Local or free serverless Redis via [Upstash.com](https://upstash.com))
-* **Telegram Bot Token** (Free via `@BotFather` on Telegram)
-
-### Environment Variables
-Configure `.env` or set environment variables:
-```bash
-DB_URL=jdbc:postgresql://localhost:5432/pricepulse
-DB_USERNAME=postgres
-DB_PASSWORD=postgres
-REDIS_HOST=localhost
-REDIS_PORT=6379
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-TELEGRAM_BOT_USERNAME=PricePulseAlertBot
-```
-
-### Build & Run
-```bash
-# Compile and package
-./mvnw clean package -DskipTests
-
-# Run application
-java -jar target/pricepulse-0.0.1-SNAPSHOT.jar
-```
+- Currently supports **Amazon and Flipkart**; adding a platform requires only a new extractor class with its own DOM selectors — the caching, locking, rate-limiting, and scheduling layers are platform-agnostic and need no changes.
+- **robots.txt parsing and commercial ToS compliance** are explicitly out of scope for this educational/portfolio project.
+- **Scraper selectors are inherently fragile** to upstream layout changes; selector failures are surfaced via the `pricepulse.scraper.dom.failures` metric rather than failing silently.
 
 ---
 
-## ⚖️ License
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+## Author
+
+Built by **Dhaval Tolani**. [GitHub](https://github.com/Dhaval1306/PricePulse)
