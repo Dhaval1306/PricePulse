@@ -47,7 +47,7 @@ public class AmazonExtractor implements PlatformExtractor {
     public boolean supports(String domainOrUrl) {
         if (domainOrUrl == null) return false;
         String lower = domainOrUrl.toLowerCase();
-        return lower.contains("amazon.in") || lower.contains("amazon.com") || lower.contains("amzn.to");
+        return lower.contains("amazon") || lower.contains("amzn.to");
     }
 
     @Override

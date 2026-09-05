@@ -45,7 +45,7 @@ public class FlipkartExtractor implements PlatformExtractor {
     public boolean supports(String domainOrUrl) {
         if (domainOrUrl == null) return false;
         String lower = domainOrUrl.toLowerCase();
-        return lower.contains("flipkart.com") || lower.contains("fkrt.it");
+        return lower.contains("flipkart") || lower.contains("fkrt.it");
     }
 
     @Override
