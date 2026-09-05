@@ -41,13 +41,18 @@ scraper:
 
 resilience4j:
   circuitbreaker:
-    instances:
-      scraperCircuitBreaker:
+    configs:
+      default:
         sliding-window-size: 10
         failure-rate-threshold: 50.0
         wait-duration-in-open-state: 60s
         permitted-number-of-calls-in-half-open-state: 3
         automatic-transition-from-open-to-half-open-enabled: true
+    instances:
+      amazon:
+        base-config: default
+      flipkart:
+        base-config: default
 
 management:
   endpoints:
