@@ -16,6 +16,8 @@ spring:
     properties:
       hibernate:
         format_sql: true
+        jdbc:
+          time_zone: Asia/Kolkata
   data:
     redis:
       host: ${REDIS_HOST:localhost}
